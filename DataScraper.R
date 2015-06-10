@@ -1,7 +1,7 @@
 library("rvest")
 
 rootURL <- "http://www.metacritic.com"
-gamesDB <- readRDS("Projects//MetacriticGames.rds")
+#gamesDB <- readRDS("Projects//MetacriticGames.rds")
 
 # Extract all publications
 getPublicationsList <- function(rootURL, save = FALSE) {
@@ -16,10 +16,12 @@ getPublicationsList <- function(rootURL, save = FALSE) {
         TRUE
       },
       error = function(x) {
+        print(x)
         Sys.sleep(20)
         FALSE
       },
       warning = function(x) {
+        print(x)
         Sys.sleep(20)
         FALSE
       })
@@ -47,12 +49,58 @@ getPublicationsList <- function(rootURL, save = FALSE) {
 }
 
 # Get the games that each publication has reviewed
-getReviewedGameList <- function(rootURL, publications, save = FALSE) {
-  
+getReviewedGameList <- function(rootURL, publications, save = FALSE, saveCheckpoints = FALSE) {
+  returnList <- list()
+  for(i in 1:nrow(publications)) {
+    publication.name <- publications[i,"pubName"]
+    publication.games <- publications[i,"reviewedGames"]
+    numOfPages <- (publication.games %/% 100)  # Normally the page number needs to be rounded up but pages start at 0 on metacritic, so page 10 is denoted as &page=9
+    gamesDF <- data.frame(name = NULL, platform = NULL, url = NULL, criticScore = NULL)
+    for(pageNum in 0:numOfPages) {
+      cat("Processing publication nr.",i,"of",nrow(publications),": page",pageNum,"of",numOfPages,"\n")
+      publication.url <- paste0(publications[i,"url"],sprintf("&page=%s",pageNum))
+      publicationHTML <- NULL
+      scrapeSuccess <- FALSE
+      errorCode <- "NO_ERROR"
+      while(!scrapeSuccess) {
+        scrapeSuccess <- tryCatch({
+          publicationHTML <- html(publication.url)
+          TRUE
+        },
+        error = function(x) {
+          print(x)
+          if("http_500" %in% class(x)) {
+            errorCode <<- "http_500"
+            return(TRUE)
+          }
+          Sys.sleep(20)
+          return(FALSE)
+        })
+      }
+      
+      if(errorCode == "http_500") {
+        next
+      }
+      
+      gamesList <- html_nodes(publicationHTML,".review_product a")
+      gamesDF <- rbind(gamesDF,data.frame(name = html_text(gamesList), 
+                                          platform = sapply(X = html_attrs(gamesList), function(x) {return(strsplit(x,"/")[[1]][3])}), 
+                                          url = paste0(rootURL,html_attrs(gamesList)), 
+                                          criticScore = as.numeric(html_text(html_nodes(publicationHTML, ".brief_critscore .indiv"))),
+                                          stringsAsFactors = FALSE))
+    }
+    returnList[[publication.name]] <- gamesDF
+    if(saveCheckpoints) {
+      unlink("MetacriticReviewedGamesList_Checkpoint.rds")
+      saveRDS(object = returnList, file = "MetacriticReviewedGamesList_Checkpoint.rds")
+    }
+  }
+  if(save) saveRDS(object = returnList, file = "MetacriticReviewedGamesList.rds")
+  return(returnList)
 }
 
-# Go to individual links and mine the games
-# To do this, create a list of games and store the information for these games in sublists:
+# Generate a "database" of games containing the interesting data (developer, publisher, etc)
+# Format:
 #   [Game + Platform]
 #     [url]
 #     [Platform]
@@ -66,148 +114,108 @@ getReviewedGameList <- function(rootURL, publications, save = FALSE) {
 #     [Genre]
 # NOTE: Games MUST be separated by platforms as well (create unique ID from name and platform) 
 # because ratings may be different and publications may not rate all platform versions of the game
-getGames <- function(rootURL, publications, saveCheckpoints = FALSE) {
-  games <- list()
+getGameData <- function(gamesList, save = FALSE, saveCheckpoints = FALSE) {
+  # Create a comprehensive list of all games from the gameList (which is split by publisher and has duplicates)
+  allGames <- data.frame(name = NULL, platform = NULL, url = NULL, stringsAsFactors = FALSE)
+  for(pub in gamesList) {allGames <- rbind(allGames, pub[,c("name","platform","url")])}
+  # Remove duplicate games
+  allGames.unique <- unique(x = allGames)
   
-  # Go through the list of publications and retrieve all games this publication has 
-  for(i in 1:nrow(publications)) {
-    publication.name <- publications[i,"pubName"]
-    publication.games <- publications[i,"reviewedGames"]
+  resultList <- list()
+  # Iterate through games and extract the data
+  for(i in 1:nrow(allGames.unique)) {
+    cat("Processing game",i,"of",nrow(allGames.unique),"... ")
+    game.name <- allGames.unique[i,"name"]
+    game.platform <- allGames.unique[i,"platform"]
+    game.url <- allGames.unique[i,"url"]
+    game.listName <- paste0(game.name,"_",game.platform)
     
-    # Get all the games this publication has reviewed
-    pageNum <- 0
-    endLoop <- FALSE
-    currentGame <- 0
-    while(TRUE) {
-      publication.url <- paste0(publications[i,"url"],sprintf("&page=%s",pageNum))
-      
-      publicationHTML <- NULL
-      scrapeSuccess.pub <- FALSE
-      while(!scrapeSuccess.pub) {
-        scrapeSuccess.pub <- tryCatch({
-          publicationHTML <- html(publication.url)
-          TRUE
-        },
-        error = function(x) {
-          cat("...failed!")
-          Sys.sleep(60)
-          FALSE
-        },
-        warning = function(x) {
-          Sys.sleep(60)
-          FALSE
-        })
-      }
-      
-      gamesList <- html_nodes(publicationHTML,".review_product a")
-      criticScoreList <- html_nodes(publicationHTML, ".brief_critscore .indiv")
-      
-      if(length(gamesList) < 100) endLoop <- TRUE
-      
-      # Go through each game, go to the site, and extract the information
-      for(j in 1:length(gamesList)) {
-        cat("Processing:",publication.name,"(",i,"of",nrow(publications),"on page",pageNum,"| Game",j,"of",length(gamesList),"... ")
-        game.name <- html_text(gamesList[[j]])
-        game.url <- paste0(rootURL,as.character(html_attrs(gamesList[[j]])))
-        gameCriticScore <- data.frame(publication = publication.name, criticScore = html_text(criticScoreList[[j]]))
-        
-        # If this game does not exist yet, the page must be accessed and the data mined
-        if(is.null(games[[game.name]])) {
-          gameHTML <- NULL
-          scrapeSuccess.game <- 0
-          while(scrapeSuccess.game == 0) {
-            scrapeSuccess.game <- tryCatch({
-              gameHTML <- html(game.url)
-              1
-            },
-            error = function(x) {
-              # If the page doesn't exist, remove the entry from the games list
-              if("http_404" %in% class(x))
-                return(-1)
-              Sys.sleep(60)
-              return(0)
-            },
-            warning = function(x) {
-              Sys.sleep(60)
-              return(0)
-            })
-          }
-          
-          if(scrapeSuccess.game == -1) {
-            cat("failed! (404)\n")
-            next
-          }
-          
-          gameMetascore <- html_text(html_nodes(gameHTML, ".positive span"))
-          if(length(gameMetascore) == 0) gameMetascore <- NA
-          gameUserscore <- html_text(html_nodes(gameHTML, ".large"))
-          if(length(gameUserscore) == 0) { gameUserscore <- NA
-          } else gameUserscore <- gameUserscore[[1]]
-          
-          gamePlatform <- html_text(html_nodes(gameHTML, ".platform span"))
-          # Remove whitespace from platform:
-          gamePlatform <- gsub(pattern = "\n",replacement = "",x = gamePlatform)
-          gamePlatform <- gsub(pattern = "\\s+", replacement = "", gamePlatform)
-          if(length(gamePlatform) == 0) gamePlatform <- NA
-          
-          gameDeveloper <- html_text(html_nodes(gameHTML, ".developer .data"))
-          # Remove whitespace from developer:
-          gameDeveloper <- gsub(pattern = "\n",replacement = "",x = gameDeveloper)
-          gameDeveloper <- gsub(pattern = "\\s+", replacement = "", gameDeveloper)
-          if(length(gameDeveloper) == 0) gameDeveloper <- NA
-          
-          gamePublisher <- html_text(html_nodes(gameHTML,".publisher .data span"))
-          # Remove whitespace from publisher:
-          gamePublisher <- gsub(pattern = "\n",replacement = "",x = gamePublisher)
-          gamePublisher <- gsub(pattern = "\\s+", replacement = "", gamePublisher)
-          if(length(gamePublisher) == 0) gamePublisher <- NA
-          
-          gameReleaseDate <- html_text(html_nodes(gameHTML, ".release_data .data"))
-          if(length(gameReleaseDate) == 0) {
-            gameReleaseDate <- NA
-          } else gameReleaseDate <- as.POSIXlt(gameReleaseDate, format = "%b %d, %Y")
-          
-          gameGenre <- html_text(html_nodes(gameHTML,".product_genre .data"))
-          # Remove whitespace from genre:
-          gameGenre <- gsub(pattern = "\n",replacement = "",x = gameGenre)
-          gameGenre <- gsub(pattern = "\\s+", replacement = "", gameGenre)
-          if(length(gameGenre) == 0) gameGenre <- NA
-          
-          # Add to games list
-          newGame <- list()
-          newGame[["url"]] <- game.url
-          newGame[["platform"]] <- gamePlatform
-          newGame[["publicationScores"]] <- gameCriticScore
-          newGame[["metascore"]] <- gameMetascore
-          newGame[["userscore"]] <- gameUserscore
-          newGame[["developer"]] <- gameDeveloper
-          newGame[["publisher"]] <- gamePublisher
-          newGame[["releaseDate"]] <- gameReleaseDate
-          newGame[["genre"]] <- gameGenre
-          
-          games[[game.name]] <- newGame
-        } else {
-          # If this game has already been mined, the page itself isn't necessary anymore, 
-          # only the critic score must be added to the [Publication Scores] entry
-          newCriticScore <- data.frame
-          games[[game.name]]$publicationScores <- rbind(games[[game.name]]$publicationScores, gameCriticScore)
-        }
-        
-        cat("success!\n")
-        
-        currentGame <- currentGame + 1
-        
-      } # End games loop
-      
-      if(currentGame > publication.games) endLoop <- TRUE
-      
-      if(endLoop) break
-      pageNum <- pageNum + 1
+    gameHTML <- NULL
+    scrapeSuccess <- 0
+    while(scrapeSuccess == 0) {
+      scrapeSuccess <- tryCatch({
+        gameHTML <- html(as.character(game.url))
+        1
+      },
+      error = function(x) {
+        print(x)
+        # If the page doesn't exist, remove the entry from the games list
+        if("http_404" %in% class(x)) return(-1)
+        if("http_500" %in% class(x)) return(-2)
+        Sys.sleep(20)
+        return(0)
+      },
+      warning = function(x) {
+        Sys.sleep(20)
+        return(0)
+      })
     }
     
-    saveRDS(object = games, file = sprintf("Projects//MetacriticGames_%s.rds",i))
-    #publications <- publications[-1, ]
-  }
+    if(scrapeSuccess == -1) {
+      cat("failed! (404)\n")
+      next
+    }
+    if(scrapeSuccess == -2) {
+      cat("failed! (500)\n")
+      next
+    }
+    
+    gameMetascore <- html_text(html_nodes(gameHTML, ".positive span"))
+    if(length(gameMetascore) == 0) gameMetascore <- NA
+    gameUserscore <- html_text(html_nodes(gameHTML, ".large"))
+    if(length(gameUserscore) == 0) { gameUserscore <- NA
+    } else gameUserscore <- gameUserscore[[1]]
+    
+    gamePlatform <- html_text(html_nodes(gameHTML, ".platform span"))
+    # Remove whitespace from platform:
+    gamePlatform <- gsub(pattern = "\n",replacement = "",x = gamePlatform)
+    gamePlatform <- gsub(pattern = "\\s+", replacement = "", gamePlatform)
+    if(length(gamePlatform) == 0) gamePlatform <- NA
+    
+    gameDeveloper <- html_text(html_nodes(gameHTML, ".developer .data"))
+    # Remove whitespace from developer:
+    gameDeveloper <- gsub(pattern = "\n",replacement = "",x = gameDeveloper)
+    gameDeveloper <- gsub(pattern = "\\s+", replacement = "", gameDeveloper)
+    if(length(gameDeveloper) == 0) gameDeveloper <- NA
+    
+    gamePublisher <- html_text(html_nodes(gameHTML,".publisher .data span"))
+    # Remove whitespace from publisher:
+    gamePublisher <- gsub(pattern = "\n",replacement = "",x = gamePublisher)
+    gamePublisher <- gsub(pattern = "\\s+", replacement = "", gamePublisher)
+    if(length(gamePublisher) == 0) gamePublisher <- NA
+    
+    gameReleaseDate <- html_text(html_nodes(gameHTML, ".release_data .data"))
+    if(length(gameReleaseDate) == 0) {
+      gameReleaseDate <- NA
+    } else gameReleaseDate <- as.POSIXlt(gameReleaseDate, format = "%b %d, %Y")
+    
+    gameGenre <- html_text(html_nodes(gameHTML,".product_genre .data"))
+    # Remove whitespace from genre:
+    gameGenre <- gsub(pattern = "\n",replacement = "",x = gameGenre)
+    gameGenre <- gsub(pattern = "\\s+", replacement = "", gameGenre)
+    if(length(gameGenre) == 0) gameGenre <- NA
+    
+    # Add to games list
+    newGame <- list()
+    newGame[["url"]] <- game.url
+    newGame[["platform"]] <- gamePlatform
+    newGame[["metascore"]] <- gameMetascore
+    newGame[["userscore"]] <- gameUserscore
+    newGame[["developer"]] <- gameDeveloper
+    newGame[["publisher"]] <- gamePublisher
+    newGame[["releaseDate"]] <- gameReleaseDate
+    newGame[["genre"]] <- gameGenre
+    
+    resultList[[game.listName]] <- newGame
+    
+    if(saveCheckpoints) {
+      unlink("MetacriticGamesDB_Checkpoint.rds")
+      saveRDS(object = resultList, file = "MetacriticGamesDB_Checkpoint.rds")
+    }
+    
+    cat("success!\n")
+  } # End Games loop
   
-  
+  if(save) saveRDS(object = resultList, file = "MetacriticGamesDB.rds")
+  return(resultList)
 }
