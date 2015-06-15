@@ -1,7 +1,6 @@
 library("rvest")
 
 rootURL <- "http://www.metacritic.com"
-#gamesDB <- readRDS("Projects//MetacriticGames.rds")
 
 # Extract all publications
 getPublicationsList <- function(rootURL, save = FALSE) {
@@ -100,28 +99,18 @@ getReviewedGameList <- function(rootURL, publications, save = FALSE, saveCheckpo
 }
 
 # Generate a "database" of games containing the interesting data (developer, publisher, etc)
-# Format:
-#   [Game + Platform]
-#     [url]
-#     [Platform]
-#     [Publication Scores]
-#       - data.frame
-#     [Metascore]
-#     [User Score]
-#     [Developer]
-#     [Publisher]
-#     [Release Date]
-#     [Genre]
 # NOTE: Games MUST be separated by platforms as well (create unique ID from name and platform) 
 # because ratings may be different and publications may not rate all platform versions of the game
 getGameData <- function(gamesList, save = FALSE, saveCheckpoints = FALSE) {
   # Create a comprehensive list of all games from the gameList (which is split by publisher and has duplicates)
   allGames <- data.frame(name = NULL, platform = NULL, url = NULL, stringsAsFactors = FALSE)
-  for(pub in gamesList) {allGames <- rbind(allGames, pub[,c("name","platform","url")])}
+  for(pub in gamesList) {
+    if(nrow(pub) > 0) allGames <- rbind(allGames, pub[,c("name","platform","url")])
+  }
   # Remove duplicate games
   allGames.unique <- unique(x = allGames)
   
-  resultList <- list()
+  resultDF <- data.frame(name = NULL, url = NULL, platform = NULL, metascore = NULL, userscore = NULL, developer = NULL, publisher = NULL, releaseDate = NULL, genre = NULL)
   # Iterate through games and extract the data
   for(i in 1:nrow(allGames.unique)) {
     cat("Processing game",i,"of",nrow(allGames.unique),"... ")
@@ -195,27 +184,28 @@ getGameData <- function(gamesList, save = FALSE, saveCheckpoints = FALSE) {
     gameGenre <- gsub(pattern = "\\s+", replacement = "", gameGenre)
     if(length(gameGenre) == 0) gameGenre <- NA
     
-    # Add to games list
-    newGame <- list()
-    newGame[["url"]] <- game.url
-    newGame[["platform"]] <- gamePlatform
-    newGame[["metascore"]] <- gameMetascore
-    newGame[["userscore"]] <- gameUserscore
-    newGame[["developer"]] <- gameDeveloper
-    newGame[["publisher"]] <- gamePublisher
-    newGame[["releaseDate"]] <- gameReleaseDate
-    newGame[["genre"]] <- gameGenre
-    
-    resultList[[game.listName]] <- newGame
+    newDF <- data.frame(name = NA, url = NA, platform = NA, metascore = NA, userscore = NA, developer = NA, publisher = NA, releaseDate = NA, genre = NA)
+    newDF$name <- game.listName
+    newDF$url <- as.character(game.url)
+    newDF$platform <- as.character(gamePlatform)
+    newDF$metascore <- as.numeric(gameMetascore)
+    newDF$userscore <- as.numeric(gameUserscore)
+    newDF$developer <- as.character(gameDeveloper[1])
+    newDF$publisher <- as.character(gamePublisher[1])
+    newDF$releaseDate <- as.character(gameReleaseDate)
+    newDF$genre <- as.character(gameGenre)
+    resultDF <- rbind(resultDF,newDF)
     
     if(saveCheckpoints) {
-      unlink("MetacriticGamesDB_Checkpoint.rds")
-      saveRDS(object = resultList, file = "MetacriticGamesDB_Checkpoint.rds")
+      if(i %% 100 == 0) {
+        unlink("MetacriticGamesDB_Checkpoint.rds")
+        saveRDS(object = resultDF, file = "MetacriticGamesDB_Checkpoint.rds")
+      }
     }
     
     cat("success!\n")
   } # End Games loop
   
-  if(save) saveRDS(object = resultList, file = "MetacriticGamesDB.rds")
-  return(resultList)
+  if(save) saveRDS(object = resultDF, file = "MetacriticGamesDB.rds")
+  return(resultDF)
 }
